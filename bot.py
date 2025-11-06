@@ -28,7 +28,7 @@ SETUP_FILE = "whitelist_setup.json"
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
-intents.members = True # REQUIRED to fetch members for role assignment
+intents.members = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -39,7 +39,6 @@ def add_to_whitelist(username: str):
     try:
         with open(WHITELIST_PATH, "r+", encoding="utf-8") as f:
             data = json.load(f)
-            # Check if user is already in the list (case-insensitive)
             if any(entry["name"].lower() == username.lower() for entry in data):
                 print(f"User '{username}' is already in the whitelist file.")
                 return "already_exists"
@@ -67,7 +66,6 @@ def reload_whitelist():
         print(f"ERROR: RCON reload failed: {e}")
         return False
 
-# NEW: Helper to parse the embed and get application data
 def get_app_data_from_embed(embed: discord.Embed):
     """Parses the review embed to get user_id and mc_username."""
     user_id = int(embed.fields[0].value.strip("<@!>"))
@@ -102,7 +100,7 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist Application"):
 
         await interaction.response.send_message("Your whitelist application has been submitted for review.", ephemeral=True)
 
-# NEW: Modal for rejection reason
+
 class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
     reason = discord.ui.TextInput(label="Please provide the reason for rejection.", style=discord.TextStyle.paragraph)
 
@@ -143,10 +141,10 @@ class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
 
 # --- VIEWS ---
 
-# FIXED: This view is now stateless and persistent
+
 class ReviewView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # Persistent view
+        super().__init__(timeout=None) 
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Simple permission check for all buttons in this view
@@ -292,3 +290,4 @@ async def setup_cmd(interaction: discord.Interaction):
 
 # --- RUN BOT ---
 bot.run(TOKEN)
+
