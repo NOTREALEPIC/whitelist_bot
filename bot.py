@@ -11,9 +11,9 @@ import hashlib
 # --- CONFIGURATION ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-WHITELIST_PATH = os.getenv("WHITELIST_PATH")
+# WHITELIST_PATH = os.getenv("WHITELIST_PATH") # <<< CHANGE: No longer needed.
 RCON_HOST = os.getenv("RCON_HOST")
-RCON_PORT = int(os.getenv("RCON_PORT", 25575)) # Added a default port
+RCON_PORT = int(os.getenv("RCON_PORT", 25575))
 RCON_PASSWORD = os.getenv("RCON_PASSWORD")
 
 # --- BOT & SERVER IDS ---
@@ -43,63 +43,42 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# <<< CRITICAL FIX: Restored correct offline-mode UUID generation
-def generate_offline_uuid(username: str) -> str:
-    """Generates the correct offline-mode UUID for a given username."""
-    base = f"OfflinePlayer:{username}"
-    md5 = hashlib.md5(base.encode("utf-8")).hexdigest()
-    return str(uuid.UUID(md5))
+# <<< CHANGE: All old file/UUID functions have been removed.
+# This new function directly whitelists players via RCON.
 
-
-# <<< PERFORMANCE FIX: Made file/network operations non-blocking
-def _add_to_whitelist_sync(username: str, device: str):
-    """Synchronous function for file I/O. DO NOT CALL DIRECTLY."""
+def add_player_via_rcon(username: str, device: str):
+    """
+    Adds a player to the server's whitelist using RCON.
+    Returns a status and the final username used.
+    """
     original_username = username.strip()
     final_username = original_username
 
-    # <<< CRITICAL FIX: Restored Bedrock/Geyser prefix support
+    # Handle Bedrock/Geyser prefix
     if "bedrock" in device.lower():
         final_username = f"1{original_username}"
-
-    try:
-        with open(WHITELIST_PATH, "r+", encoding="utf-8") as f:
-            data = json.load(f)
-            if any(entry["name"].lower() == final_username.lower() for entry in data):
-                return "already_exists", final_username
-
-            # <<< CRITICAL FIX: Use the correct offline UUID generation
-            offline_uuid = generate_offline_uuid(final_username)
-            data.append({"uuid": offline_uuid, "name": final_username})
-
-            f.seek(0)
-            json.dump(data, f, indent=2)
-            f.truncate()
-        return "success", final_username
-    except FileNotFoundError:
-        return "file_not_found", original_username
-    except Exception as e:
-        print(f"Error writing whitelist: {e}")
-        return "write_error", original_username
-
-async def add_to_whitelist(username: str, device: str):
-    """Async wrapper to run the file I/O in a separate thread."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _add_to_whitelist_sync, username, device)
-
-
-def reload_whitelist():
-    """Sends 'whitelist reload' command via RCON. This is a blocking call."""
+    
     try:
         with MCRcon(RCON_HOST, RCON_PASSWORD, port=RCON_PORT) as mcr:
-            resp = mcr.command("whitelist reload")
-            print("RCON: whitelist reload ->", resp)
-            return True
+            # The server will handle the UUID lookup automatically
+            resp = mcr.command(f"whitelist add {final_username}")
+            print(f"RCON: whitelist add {final_username} ->", resp)
+
+            if "already whitelisted" in resp.lower():
+                return "already_whitelisted", final_username
+            elif "added" in resp.lower():
+                return "success", final_username
+            else:
+                # Handle unexpected responses from the server
+                return "rcon_error", final_username
+                
     except Exception as e:
         print("RCON error:", e)
-        return False
+        return "rcon_error", final_username
 
 
-# <<< ROBUSTNESS FIX: Safer data parsing from embeds
+# --- HELPER FUNCTIONS ---
+
 def get_app_data_from_embed(embed: discord.Embed):
     """Extracts application data from review embed by field name."""
     user_id, mc_username, device = None, None, "Java" # Default device to Java
@@ -170,22 +149,20 @@ class ReviewView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, custom_id="review_approve")
-    @commands.has_role(DEV_ROLE_NAME)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # We run the blocking RCON command in an executor to not freeze the bot
         await interaction.response.defer(ephemeral=True, thinking=True)
+        loop = asyncio.get_running_loop()
 
         user_id, mc_username, device = get_app_data_from_embed(interaction.message.embeds[0])
-        status, final_username = await add_to_whitelist(mc_username, device)
+        
+        # <<< CHANGE: Using the new RCON function
+        status, final_username = await loop.run_in_executor(None, add_player_via_rcon, mc_username, device)
 
-        if status != "success":
-            feedback = "An unknown error occurred."
-            if status == "already_exists": feedback = f"User `{final_username}` is already in the whitelist file."
-            elif status == "file_not_found": feedback = "ERROR: `whitelist.json` file not found!"
-            return await interaction.followup.send(feedback, ephemeral=True)
+        if status == "rcon_error":
+            return await interaction.followup.send("❌ **Error:** Could not connect to the server via RCON. The player was not whitelisted.", ephemeral=True)
 
-        if not reload_whitelist():
-            await interaction.followup.send("User added to file, but **failed to reload server via RCON**.", ephemeral=True)
-
+        # The rest of the logic can continue even if the player was already whitelisted
         embed = interaction.message.embeds[0]
         embed.color = EMBED_COLORS["success"]
         embed.set_footer(text=f"Approved by {interaction.user.display_name} ✅", icon_url=SERVER_ICON_URL)
@@ -204,11 +181,14 @@ class ReviewView(discord.ui.View):
         
         await bot.get_channel(APPROVED_CHANNEL_ID).send(embed=log_embed)
         await bot.get_channel(LOG_CHANNEL_ID).send(embed=log_embed)
+        
+        if status == "already_whitelisted":
+            await interaction.followup.send(f"✅ Player `{final_username}` is already whitelisted. Role has been assigned/re-synced.", ephemeral=True)
+        else: # success
+            await interaction.followup.send(f"✅ Player `{final_username}` has been added to the whitelist and given the role.", ephemeral=True)
 
-        await interaction.followup.send("Application approved. User whitelisted and role assigned.", ephemeral=True)
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, custom_id="review_reject")
-    @commands.has_role(DEV_ROLE_NAME)
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RejectionModal(original_interaction=interaction))
 
@@ -230,8 +210,11 @@ async def on_ready():
     bot.add_view(ReviewView())
     print("Persistent views registered.")
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash command(s).")
+        # A check for DEV_ROLE_NAME before syncing can be good practice
+        # to prevent accidental command registration on wrong servers
+        if DEV_ROLE_NAME:
+            synced = await bot.tree.sync()
+            print(f"Synced {len(synced)} slash command(s).")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
@@ -253,8 +236,10 @@ async def setup_error(interaction: discord.Interaction, error: commands.CommandE
     if isinstance(error, commands.MissingRole):
         await interaction.response.send_message("You do not have the required role to use this command.", ephemeral=True)
     else:
-        raise error
+        # It's good practice to log other unexpected errors
+        print(f"An error occurred in setup_cmd: {error}")
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+
 
 # --- RUN BOT ---
 bot.run(TOKEN)
-
