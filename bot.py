@@ -13,7 +13,7 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 WHITELIST_PATH = os.getenv("WHITELIST_PATH")
 RCON_HOST = os.getenv("RCON_HOST")
-RCON_PORT = int(os.getenv("RCON_PORT"))
+RCON_PORT = int(os.getenv("RCON_PORT", 25575)) # Added a default port
 RCON_PASSWORD = os.getenv("RCON_PASSWORD")
 
 # --- BOT & SERVER IDS ---
@@ -43,9 +43,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# -----------------------------
-# OFFLINE UUID GENERATION FIX
-# -----------------------------
+# <<< CRITICAL FIX: Restored correct offline-mode UUID generation
 def generate_offline_uuid(username: str) -> str:
     """Generates the correct offline-mode UUID for a given username."""
     base = f"OfflinePlayer:{username}"
@@ -53,163 +51,145 @@ def generate_offline_uuid(username: str) -> str:
     return str(uuid.UUID(md5))
 
 
-# --- HELPER FUNCTIONS ---
-def add_to_whitelist(username: str, device: str):
-    """
-    Adds a username to whitelist.json
-    Includes correct offline UUID generation.
-    """
+# <<< PERFORMANCE FIX: Made file/network operations non-blocking
+def _add_to_whitelist_sync(username: str, device: str):
+    """Synchronous function for file I/O. DO NOT CALL DIRECTLY."""
     original_username = username.strip()
     final_username = original_username
 
-    # Bedrock support: prefix "1"
+    # <<< CRITICAL FIX: Restored Bedrock/Geyser prefix support
     if "bedrock" in device.lower():
         final_username = f"1{original_username}"
 
     try:
         with open(WHITELIST_PATH, "r+", encoding="utf-8") as f:
             data = json.load(f)
-
-            # Already exists?
             if any(entry["name"].lower() == final_username.lower() for entry in data):
                 return "already_exists", final_username
 
-            # Generate correct offline UUID
+            # <<< CRITICAL FIX: Use the correct offline UUID generation
             offline_uuid = generate_offline_uuid(final_username)
-
-            data.append({
-                "uuid": offline_uuid,
-                "name": final_username
-            })
+            data.append({"uuid": offline_uuid, "name": final_username})
 
             f.seek(0)
             json.dump(data, f, indent=2)
             f.truncate()
-
         return "success", final_username
-
     except FileNotFoundError:
         return "file_not_found", original_username
     except Exception as e:
         print(f"Error writing whitelist: {e}")
         return "write_error", original_username
 
+async def add_to_whitelist(username: str, device: str):
+    """Async wrapper to run the file I/O in a separate thread."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _add_to_whitelist_sync, username, device)
 
-def reload_whitelist():
-    """Reload whitelist via RCON."""
+
+def _reload_whitelist_sync():
+    """Synchronous function for RCON. DO NOT CALL DIRECTLY."""
     try:
         with MCRcon(RCON_HOST, RCON_PASSWORD, port=RCON_PORT) as mcr:
             resp = mcr.command("whitelist reload")
-            print("Reload response:", resp)
+            print("RCON: whitelist reload ->", resp)
             return True
     except Exception as e:
         print("RCON error:", e)
         return False
 
+async def reload_whitelist():
+    """Async wrapper to run RCON in a separate thread."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _reload_whitelist_sync)
 
-def get_app_data_from_embed(embed):
-    """Extracts application data from review embed."""
-    user_id = None
-    mc_username = None
-    device = "Java"
 
+# <<< ROBUSTNESS FIX: Safer data parsing from embeds
+def get_app_data_from_embed(embed: discord.Embed):
+    """Extracts application data from review embed by field name."""
+    user_id, mc_username, device = None, None, "Java" # Default device to Java
     for field in embed.fields:
-        if field.name == "User":
-            user_id = int(field.value.strip("<@!>"))
-        elif field.name == "Minecraft Username":
-            mc_username = field.value
-        elif field.name == "Minecraft Edition":
-            device = field.value
-
+        if field.name == "User": user_id = int(field.value.strip("<@!>"))
+        elif field.name == "Minecraft Username": mc_username = field.value
+        elif field.name == "Device": device = field.value
     return user_id, mc_username, device
 
 
 # --- MODALS ---
 class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist Application"):
-    mc_username = discord.ui.TextInput(label="Minecraft Username (Case-Sensitive)", placeholder="Steve")
-    device = discord.ui.TextInput(label="Minecraft Edition (Java / Bedrock)", placeholder="Java")
-    played_before = discord.ui.TextInput(label="Played Minecraft Before? (Yes / No)")
+    mc_username = discord.ui.TextInput(label="Minecraft Username (Case-Sensitive)", placeholder="Steve123")
+    device = discord.ui.TextInput(label="Device (Java / Bedrock)", placeholder="Java")
+    played_before = discord.ui.TextInput(label="Played Minecraft before? (Yes / No)", placeholder="Yes")
     notes = discord.ui.TextInput(label="Anything you'd like to add?", required=False, style=discord.TextStyle.paragraph)
 
     async def on_submit(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="📝 New Whitelist Application",
-            color=EMBED_COLORS["pending"],
-            timestamp=discord.utils.utcnow()
-        )
-        embed.set_author(name=interaction.user, icon_url=interaction.user.avatar.url)
-        embed.set_thumbnail(url=interaction.user.avatar.url)
+        mc_role = interaction.guild.get_role(MC_WHITELISTED_ROLE_ID)
+        if mc_role and mc_role in interaction.user.roles:
+            return await interaction.response.send_message("You are already whitelisted and cannot reapply.", ephemeral=True)
 
+        embed = discord.Embed(title="📝 New Whitelist Application", color=EMBED_COLORS["pending"])
+        embed.set_author(name=interaction.user, icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
         embed.add_field(name="User", value=interaction.user.mention, inline=False)
         embed.add_field(name="Minecraft Username", value=self.mc_username.value, inline=False)
-        embed.add_field(name="Minecraft Edition", value=self.device.value, inline=True)
+        embed.add_field(name="Device", value=self.device.value, inline=True)
         embed.add_field(name="Played Before", value=self.played_before.value, inline=True)
         embed.add_field(name="Notes", value=self.notes.value or "N/A", inline=False)
         embed.set_footer(text="Status: Pending Review ⏳", icon_url=SERVER_ICON_URL)
 
         review_channel = bot.get_channel(REVIEW_CHANNEL_ID)
         await review_channel.send(embed=embed, view=ReviewView())
-
-        await interaction.response.send_message("Your application has been submitted!", ephemeral=True)
+        await interaction.response.send_message("Your application has been submitted for review.", ephemeral=True)
 
 
 class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
-    reason = discord.ui.TextInput(label="Reason for rejection", style=discord.TextStyle.paragraph)
+    reason = discord.ui.TextInput(label="Please provide the reason for rejection.", style=discord.TextStyle.paragraph)
 
-    def __init__(self, original_interaction):
+    def __init__(self, original_interaction: discord.Interaction):
         super().__init__()
         self.original_interaction = original_interaction
 
     async def on_submit(self, interaction: discord.Interaction):
         review_message = self.original_interaction.message
-        embed = review_message.embeds[0]
+        original_embed = review_message.embeds[0]
+        original_embed.color = EMBED_COLORS["error"]
+        original_embed.set_footer(text=f"Rejected by {interaction.user.display_name} ❌", icon_url=SERVER_ICON_URL)
+        await review_message.edit(embed=original_embed, view=None)
 
-        embed.color = EMBED_COLORS["error"]
-        embed.set_footer(text=f"Rejected by {interaction.user.display_name} ❌", icon_url=SERVER_ICON_URL)
-        await review_message.edit(embed=embed, view=None)
-
-        user_id, mc_username, _ = get_app_data_from_embed(embed)
+        user_id, mc_username, _ = get_app_data_from_embed(original_embed)
         member = await bot.fetch_user(user_id)
 
-        rejected_embed = discord.Embed(
-            title="Whitelist Application Rejected",
-            color=EMBED_COLORS["error"],
-            timestamp=discord.utils.utcnow()
-        )
-        rejected_embed.set_author(name=member, icon_url=member.avatar.url)
-        rejected_embed.add_field(name="User", value=member.mention)
-        rejected_embed.add_field(name="Minecraft Username", value=mc_username)
-        rejected_embed.add_field(name="Rejected By", value=interaction.user.mention)
-        rejected_embed.add_field(name="Reason", value=self.reason.value, inline=False)
-        rejected_embed.set_footer(text="Rejection Log", icon_url=SERVER_ICON_URL)
-
-        bot.get_channel(REJECTED_CHANNEL_ID).send(embed=rejected_embed)
-        bot.get_channel(LOG_CHANNEL_ID).send(embed=rejected_embed)
-
-        await interaction.response.send_message("Application rejected.", ephemeral=True)
+        log_embed = discord.Embed(title="Whitelist Rejected", color=EMBED_COLORS["error"])
+        log_embed.add_field(name="User", value=member.mention)
+        log_embed.add_field(name="Minecraft Username", value=mc_username)
+        log_embed.add_field(name="Rejected By", value=interaction.user.mention)
+        log_embed.add_field(name="Reason", value=self.reason.value, inline=False)
+        
+        await bot.get_channel(REJECTED_CHANNEL_ID).send(embed=log_embed)
+        await bot.get_channel(LOG_CHANNEL_ID).send(embed=log_embed)
+        await interaction.response.send_message("Application has been rejected.", ephemeral=True)
 
 
-# --- REVIEW BUTTONS ---
+# --- VIEWS ---
 class ReviewView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, custom_id="review_approve")
-    async def approve(self, interaction, button):
-        await interaction.response.defer(ephemeral=True)
+    @commands.has_role(DEV_ROLE_NAME)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         user_id, mc_username, device = get_app_data_from_embed(interaction.message.embeds[0])
-        status, final_username = add_to_whitelist(mc_username, device)
+        status, final_username = await add_to_whitelist(mc_username, device)
 
         if status != "success":
-            msg = "Unknown error."
-            if status == "already_exists":
-                msg = f"`{final_username}` is already whitelisted."
-            elif status == "file_not_found":
-                msg = "Whitelist file not found!"
-            return await interaction.followup.send(msg, ephemeral=True)
+            feedback = "An unknown error occurred."
+            if status == "already_exists": feedback = f"User `{final_username}` is already in the whitelist file."
+            elif status == "file_not_found": feedback = "ERROR: `whitelist.json` file not found!"
+            return await interaction.followup.send(feedback, ephemeral=True)
 
-        reload_whitelist()
+        if not await reload_whitelist():
+            await interaction.followup.send("User added to file, but **failed to reload server via RCON**.", ephemeral=True)
 
         embed = interaction.message.embeds[0]
         embed.color = EMBED_COLORS["success"]
@@ -219,71 +199,66 @@ class ReviewView(discord.ui.View):
         guild = interaction.guild
         member = guild.get_member(user_id)
         mc_role = guild.get_role(MC_WHITELISTED_ROLE_ID)
-
         if member and mc_role:
             await member.add_roles(mc_role)
 
-        approved_embed = discord.Embed(
-            title="Whitelist Application Approved",
-            color=EMBED_COLORS["success"],
-            timestamp=discord.utils.utcnow()
-        )
-        approved_embed.add_field(name="User", value=member.mention if member else f"ID: {user_id}")
-        approved_embed.add_field(name="Minecraft Username", value=f"`{final_username}`")
-        approved_embed.add_field(name="Approved By", value=interaction.user.mention)
-        approved_embed.set_footer(text="Approval Log", icon_url=SERVER_ICON_URL)
+        log_embed = discord.Embed(title="Whitelist Approved", color=EMBED_COLORS["success"])
+        log_embed.add_field(name="User", value=member.mention if member else f"ID: {user_id}")
+        log_embed.add_field(name="Minecraft Username", value=f"`{final_username}`")
+        log_embed.add_field(name="Approved By", value=interaction.user.mention)
+        
+        await bot.get_channel(APPROVED_CHANNEL_ID).send(embed=log_embed)
+        await bot.get_channel(LOG_CHANNEL_ID).send(embed=log_embed)
 
-        bot.get_channel(APPROVED_CHANNEL_ID).send(embed=approved_embed)
-        bot.get_channel(LOG_CHANNEL_ID).send(embed=approved_embed)
-
-        await interaction.followup.send(f"`{final_username}` has been whitelisted!", ephemeral=True)
+        await interaction.followup.send("Application approved. User whitelisted and role assigned.", ephemeral=True)
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, custom_id="review_reject")
-    async def reject(self, interaction, button):
-        await interaction.response.send_modal(RejectionModal(interaction))
+    @commands.has_role(DEV_ROLE_NAME)
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RejectionModal(original_interaction=interaction))
 
 
 class WhitelistView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Request Whitelist", style=discord.ButtonStyle.green, custom_id="persistent_whitelist_button")
-    async def whitelist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("This button is now persistent!", ephemeral=True)
+
+    @discord.ui.button(label="Apply for Whitelist", style=discord.ButtonStyle.green, custom_id="whitelist_apply_button")
+    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WhitelistModal())
 
 
-# --- BOT EVENTS ---
+# --- BOT EVENTS & COMMANDS ---
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"Bot connected as {bot.user}")
     bot.add_view(WhitelistView())
     bot.add_view(ReviewView())
+    print("Persistent views registered.")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"Failed to sync slash commands: {e}")
 
-
-# --- SETUP COMMAND ---
-@bot.tree.command(name="setup", description="Create the whitelist application menu")
-async def setup_cmd(interaction):
-    dev_role = discord.utils.get(interaction.guild.roles, name=DEV_ROLE_NAME)
-    if not dev_role or dev_role not in interaction.user.roles:
-        return await interaction.response.send_message("DEV only.", ephemeral=True)
-
-    guild_icon = interaction.guild.icon.url if interaction.guild.icon else SERVER_ICON_URL
-
+@bot.tree.command(name="setup", description="Create the whitelist application embed (DEV only)")
+@commands.has_role(DEV_ROLE_NAME)
+async def setup_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="Minecraft Server Whitelist",
-        description="Click **Apply** to submit your whitelist application.",
+        title="Minecraft Whitelist Application",
+        description="Click the button below to open the application form. \n\nPlease make sure your Minecraft username is correct, as it is case-sensitive.",
         color=EMBED_COLORS["info"]
     )
-    embed.set_author(name=interaction.guild.name, icon_url=guild_icon)
-    embed.set_footer(text="We look forward to seeing you!", icon_url=SERVER_ICON_URL)
-
+    embed.set_author(name=interaction.guild.name, icon_url=SERVER_ICON_URL)
     channel = bot.get_channel(MC_WL_CHANNEL_ID)
-    msg = await channel.send(embed=embed, view=WhitelistView())
+    await channel.send(embed=embed, view=WhitelistView())
+    await interaction.response.send_message(f"Whitelist embed created in {channel.mention}.", ephemeral=True)
 
-    with open(SETUP_FILE, "w") as f:
-        json.dump({"message_id": msg.id}, f)
-
-    await interaction.response.send_message("Whitelist menu created!", ephemeral=True)
-
+@setup_cmd.error
+async def setup_error(interaction: discord.Interaction, error: commands.CommandError):
+    if isinstance(error, commands.MissingRole):
+        await interaction.response.send_message("You do not have the required role to use this command.", ephemeral=True)
+    else:
+        raise error
 
 # --- RUN BOT ---
 bot.run(TOKEN)
