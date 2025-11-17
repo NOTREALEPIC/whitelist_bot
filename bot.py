@@ -87,8 +87,8 @@ async def add_to_whitelist(username: str, device: str):
     return await loop.run_in_executor(None, _add_to_whitelist_sync, username, device)
 
 
-def _reload_whitelist_sync():
-    """Synchronous function for RCON. DO NOT CALL DIRECTLY."""
+def reload_whitelist():
+    """Sends 'whitelist reload' command via RCON. This is a blocking call."""
     try:
         with MCRcon(RCON_HOST, RCON_PASSWORD, port=RCON_PORT) as mcr:
             resp = mcr.command("whitelist reload")
@@ -97,11 +97,6 @@ def _reload_whitelist_sync():
     except Exception as e:
         print("RCON error:", e)
         return False
-
-async def reload_whitelist():
-    """Async wrapper to run RCON in a separate thread."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _reload_whitelist_sync)
 
 
 # <<< ROBUSTNESS FIX: Safer data parsing from embeds
@@ -188,7 +183,7 @@ class ReviewView(discord.ui.View):
             elif status == "file_not_found": feedback = "ERROR: `whitelist.json` file not found!"
             return await interaction.followup.send(feedback, ephemeral=True)
 
-        if not await reload_whitelist():
+        if not reload_whitelist():
             await interaction.followup.send("User added to file, but **failed to reload server via RCON**.", ephemeral=True)
 
         embed = interaction.message.embeds[0]
@@ -262,3 +257,4 @@ async def setup_error(interaction: discord.Interaction, error: commands.CommandE
 
 # --- RUN BOT ---
 bot.run(TOKEN)
+
