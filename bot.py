@@ -1,11 +1,12 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import json
 import os
 import asyncio
 from mcrcon import MCRcon
 from dotenv import load_dotenv
-import time # Used for timestamps
+import time 
+from itertools import cycle # <<< NEW: For cycling through statuses
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -28,10 +29,10 @@ SETUP_FILE = "whitelist_setup.json"
 # --- AESTHETICS ---
 SERVER_ICON_URL = "https://cdn.discordapp.com/icons/1132719558231793744/a_d78d4615a72f0b7c7ed14b301c34a243.gif"
 EMBED_COLORS = {
-    "info": discord.Color.from_rgb(255, 193, 7),      # Gold
-    "pending": discord.Color.from_rgb(54, 150, 226),  # Blue
-    "success": discord.Color.from_rgb(76, 175, 80),   # Green
-    "error": discord.Color.from_rgb(244, 67, 54),     # Red
+    "info": discord.Color.from_rgb(255, 193, 7),
+    "pending": discord.Color.from_rgb(54, 150, 226),
+    "success": discord.Color.from_rgb(76, 175, 80),
+    "error": discord.Color.from_rgb(244, 67, 54),
 }
 
 intents = discord.Intents.default()
@@ -39,6 +40,17 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# <<< NEW: Define the list of activities for the bot's status
+bot_statuses = cycle([
+    discord.Activity(type=discord.ActivityType.watching, name="DIVINE HUB"),
+    discord.Game(name="DIVINE HUB MC"),
+    discord.Game(name="⚽🏆DIVINE EPIC SOCCER🏆⚽"),
+    discord.Game(name="🧬⚡Divine vs Senior Non Epic Teams⚡🧬"),
+    discord.Game(name="🥊|DIVINE SUPER SMASH|🥊"),
+    discord.Game(name="🧬⚡DIVINE VS ISHOWPP EPIC TEAMS⚡🧬"),
+    discord.Game(name="Clash of Clans")
+])
 
 # --- RCON & HELPER FUNCTIONS ---
 def add_player_via_rcon(username: str, device: str):
@@ -94,15 +106,15 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist Application"):
         await review_channel.send(embed=embed, view=ReviewView())
         await interaction.response.send_message("✅ Your application has been submitted for review!", ephemeral=True)
 
-
 class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
     reason = discord.ui.TextInput(label="Please provide the reason for rejection.", style=discord.TextStyle.paragraph, min_length=10)
-
+    
     def __init__(self, original_interaction: discord.Interaction):
         super().__init__()
         self.original_interaction = original_interaction
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Logic for handling the rejection...
         review_message = self.original_interaction.message
         original_embed = review_message.embeds[0]
         original_embed.color = EMBED_COLORS["error"]
@@ -135,11 +147,7 @@ class ReviewView(discord.ui.View):
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, custom_id="review_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
-
         user_id, mc_username, device = get_app_data_from_embed(interaction.message.embeds[0])
-        
-        # <<< FINAL FIX: Removed the `run_in_executor` to prevent the `signal` error.
-        # This RCON command now runs directly in the main thread, which is safe.
         status, final_username = add_player_via_rcon(mc_username, device)
 
         if status == "rcon_error":
@@ -175,11 +183,9 @@ class ReviewView(discord.ui.View):
         else:
             await interaction.followup.send(f"✅ Player `{final_username}` added to the whitelist.", ephemeral=True)
 
-
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, custom_id="review_reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RejectionModal(original_interaction=interaction))
-
 
 class WhitelistView(discord.ui.View):
     def __init__(self):
@@ -191,12 +197,22 @@ class WhitelistView(discord.ui.View):
 
 
 # --- BOT EVENTS & COMMANDS ---
+
+# <<< NEW: This task loops every 10 seconds to change the bot's status
+@tasks.loop(seconds=10)
+async def change_status():
+    await bot.change_presence(activity=next(bot_statuses))
+
 @bot.event
 async def on_ready():
     print(f"Bot connected as {bot.user}")
     bot.add_view(WhitelistView())
     bot.add_view(ReviewView())
     print("Persistent views registered.")
+    
+    # <<< NEW: Start the status looping task
+    change_status.start()
+    
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s).")
@@ -230,7 +246,6 @@ async def setup_error(interaction: discord.Interaction, error: commands.CommandE
     else:
         print(f"An error occurred in setup_cmd: {error}")
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
-
 
 # --- RUN BOT ---
 bot.run(TOKEN)
