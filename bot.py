@@ -6,13 +6,13 @@ import asyncio
 from mcrcon import MCRcon
 from dotenv import load_dotenv
 import time 
-from itertools import cycle # <<< NEW: For cycling through statuses
+from itertools import cycle 
 
 # --- CONFIGURATION ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 RCON_HOST = os.getenv("RCON_HOST")
-RCON_PORT = int(os.getenv("RCON_PORT", 25575))
+RCON_PORT = int(os.getenv("RCON_PORT")
 RCON_PASSWORD = os.getenv("RCON_PASSWORD")
 
 # --- BOT & SERVER IDS ---
@@ -22,6 +22,8 @@ APPROVED_CHANNEL_ID = 1438763962496712764
 REJECTED_CHANNEL_ID = 1438764012895735941
 LOG_CHANNEL_ID = 1438793262994423838
 MC_WHITELISTED_ROLE_ID = 1438789711023046718
+PENDING_CHANNEL_ID = 1441112411443695626  
+
 DEV_ROLE_NAME = "Staff"
 
 SETUP_FILE = "whitelist_setup.json"
@@ -41,7 +43,7 @@ intents.guilds = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# <<< NEW: Define the list of activities for the bot's status
+# --- STATUS CYCLING ---
 bot_statuses = cycle([
     discord.Activity(type=discord.ActivityType.watching, name="DIVINE HUB"),
     discord.Game(name="DIVINE HUB MC"),
@@ -80,6 +82,18 @@ def get_app_data_from_embed(embed: discord.Embed):
         elif "Edition" in field.name: device = field.value
     return user_id, mc_username, device
 
+async def delete_pending_message(bot, embed):
+    """Helper to delete message from pending channel based on PID in footer."""
+    try:
+        if embed.footer.text and "PID:" in embed.footer.text:
+            pid = int(embed.footer.text.split("PID: ")[1])
+            p_channel = bot.get_channel(PENDING_CHANNEL_ID)
+            if p_channel:
+                p_msg = await p_channel.fetch_message(pid)
+                await p_msg.delete()
+    except Exception as e:
+        print(f"Could not delete pending message: {e}")
+
 # --- MODALS ---
 class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist Application"):
     mc_username = discord.ui.TextInput(label="Minecraft Username (Case-Sensitive)", placeholder="Steve123")
@@ -100,10 +114,18 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist Application"):
         embed.add_field(name="🗓️ Played Before?", value=self.played_before.value, inline=True)
         if self.notes.value:
             embed.add_field(name="🗒️ Notes", value=self.notes.value, inline=False)
-        embed.set_footer(text="Status: Pending Review", icon_url=SERVER_ICON_URL)
+        
+        # 1. Send to PENDING CHANNEL first
+        pending_channel = bot.get_channel(PENDING_CHANNEL_ID)
+        pending_msg = await pending_channel.send(embed=embed)
 
+        # 2. Add the Pending Message ID (PID) to the footer so we can delete it later
+        embed.set_footer(text=f"Status: Pending Review | PID: {pending_msg.id}", icon_url=SERVER_ICON_URL)
+
+        # 3. Send to REVIEW CHANNEL
         review_channel = bot.get_channel(REVIEW_CHANNEL_ID)
         await review_channel.send(embed=embed, view=ReviewView())
+        
         await interaction.response.send_message("✅ Your application has been submitted for review!", ephemeral=True)
 
 class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
@@ -117,7 +139,13 @@ class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
         # Logic for handling the rejection...
         review_message = self.original_interaction.message
         original_embed = review_message.embeds[0]
+
+        # --- DELETE FROM PENDING CHANNEL ---
+        await delete_pending_message(bot, original_embed)
+        # -----------------------------------
+
         original_embed.color = EMBED_COLORS["error"]
+        # Update footer to show who rejected it (removes the PID)
         original_embed.set_footer(text=f"Rejected by {interaction.user.display_name}", icon_url=SERVER_ICON_URL)
         original_embed.timestamp = discord.utils.utcnow()
         await review_message.edit(embed=original_embed, view=None)
@@ -147,14 +175,21 @@ class ReviewView(discord.ui.View):
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, custom_id="review_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        user_id, mc_username, device = get_app_data_from_embed(interaction.message.embeds[0])
+        
+        embed = interaction.message.embeds[0]
+
+        # --- DELETE FROM PENDING CHANNEL ---
+        await delete_pending_message(bot, embed)
+        # -----------------------------------
+
+        user_id, mc_username, device = get_app_data_from_embed(embed)
         status, final_username = add_player_via_rcon(mc_username, device)
 
         if status == "rcon_error":
             return await interaction.followup.send("❌ **Error:** Could not connect to the server via RCON.", ephemeral=True)
 
-        embed = interaction.message.embeds[0]
         embed.color = EMBED_COLORS["success"]
+        # Update footer to show who approved it (removes the PID)
         embed.set_footer(text=f"Approved by {interaction.user.display_name}", icon_url=SERVER_ICON_URL)
         embed.timestamp = discord.utils.utcnow()
         await interaction.message.edit(embed=embed, view=None)
@@ -198,7 +233,6 @@ class WhitelistView(discord.ui.View):
 
 # --- BOT EVENTS & COMMANDS ---
 
-# <<< NEW: This task loops every 10 seconds to change the bot's status
 @tasks.loop(seconds=10)
 async def change_status():
     await bot.change_presence(activity=next(bot_statuses))
@@ -210,7 +244,6 @@ async def on_ready():
     bot.add_view(ReviewView())
     print("Persistent views registered.")
     
-    # <<< NEW: Start the status looping task
     change_status.start()
     
     try:
