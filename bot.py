@@ -114,20 +114,33 @@ class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
         self.original_interaction = original_interaction
 
     async def on_submit(self, interaction: discord.Interaction):
+        # 1. Defer immediately to prevent "Unknown interaction" error
+        await interaction.response.defer(ephemeral=True)
+
         # Logic for handling the rejection...
         review_message = self.original_interaction.message
         original_embed = review_message.embeds[0]
         original_embed.color = EMBED_COLORS["error"]
         original_embed.set_footer(text=f"Rejected by {interaction.user.display_name}", icon_url=SERVER_ICON_URL)
         original_embed.timestamp = discord.utils.utcnow()
+        
+        # Edit the review message
         await review_message.edit(embed=original_embed, view=None)
 
         user_id, mc_username, _ = get_app_data_from_embed(original_embed)
-        member = await bot.fetch_user(user_id)
         
-        log_embed = discord.Embed(title="❌ Application Rejected", description=f"{member.mention}'s application was rejected.", color=EMBED_COLORS["error"])
-        log_embed.set_thumbnail(url=member.display_avatar.url)
-        log_embed.add_field(name="👤 Applicant", value=f"{member.mention} (`{member.id}`)", inline=False)
+        # Fetch user (safely)
+        try:
+            member = await bot.fetch_user(user_id)
+            member_mention = member.mention
+            member_avatar = member.display_avatar.url
+        except:
+            member_mention = f"User `{user_id}`"
+            member_avatar = SERVER_ICON_URL
+        
+        log_embed = discord.Embed(title="❌ Application Rejected", description=f"{member_mention}'s application was rejected.", color=EMBED_COLORS["error"])
+        log_embed.set_thumbnail(url=member_avatar)
+        log_embed.add_field(name="👤 Applicant", value=f"{member_mention} (`{user_id}`)", inline=False)
         log_embed.add_field(name="⛏️ Minecraft Username", value=mc_username, inline=False)
         log_embed.add_field(name="📝 Reason", value=self.reason.value, inline=False)
         log_embed.add_field(name="👨‍⚖️ Rejected By", value=interaction.user.mention, inline=True)
@@ -136,8 +149,9 @@ class RejectionModal(discord.ui.Modal, title="Rejection Reason"):
         
         await bot.get_channel(REJECTED_CHANNEL_ID).send(embed=log_embed)
         await bot.get_channel(LOG_CHANNEL_ID).send(embed=log_embed)
-        await interaction.response.send_message("Application has been rejected.", ephemeral=True)
-
+        
+        # 2. Use followup because we deferred earlier
+        await interaction.followup.send("Application has been rejected.", ephemeral=True)
 
 # --- VIEWS ---
 class ReviewView(discord.ui.View):
@@ -249,3 +263,4 @@ async def setup_error(interaction: discord.Interaction, error: commands.CommandE
 
 # --- RUN BOT ---
 bot.run(TOKEN)
+
