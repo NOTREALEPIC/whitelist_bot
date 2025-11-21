@@ -138,7 +138,7 @@ class BroadcastModal(discord.ui.Modal, title="📢 Broadcast Message"):
     message = discord.ui.TextInput(label="Message", style=discord.TextStyle.paragraph)
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        rcon_command(f'tellraw @a {{"text":"[Discord] {self.message.value}","color":"aqua"}}')
+        rcon_command(f'tellraw @a {{"text":"{self.message.value}","color":"aqua"}}')
         await interaction.followup.send(f"📢 Sent: `{self.message.value}`", ephemeral=True)
 
 class KickModal(discord.ui.Modal, title="💀 Kick Player"):
@@ -441,3 +441,4 @@ async def setup_status(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Live Status Created", ephemeral=True)
 
 bot.run(TOKEN)
+
