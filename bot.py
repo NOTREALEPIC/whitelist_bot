@@ -1,6 +1,3 @@
-Here is the complete code. I have taken the **full functionality** of your first code block (Admin Panel, Live Status, RCON tools) and updated the **Whitelist, Review, Approval, Rejection, and Setup** sections to match the detailed Embed styles and logging format from your second code block.
-
-```python
 import discord
 from discord.ext import commands, tasks
 import json
@@ -444,4 +441,3 @@ async def setup_status(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Live Status Created", ephemeral=True)
 
 bot.run(TOKEN)
-```
